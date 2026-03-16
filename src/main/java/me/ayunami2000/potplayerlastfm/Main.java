@@ -15,6 +15,7 @@ import de.umass.lastfm.Track;
 import javax.imageio.ImageIO;
 import java.awt.*;
 import java.io.IOException;
+import java.net.URI;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.Objects;
@@ -23,36 +24,37 @@ import java.util.List;
 import javax.swing.*;
 
 public class Main {
+
+    // Last.fm API application credentials (app-level, not user secrets)
+    // Replace with your own from https://www.last.fm/api/account/create
+    private static final String API_KEY = "d398a283955fee02e6fe1cd83e97afcf";
+    private static final String API_SECRET = "5fdf461c6178a7841af1d2950d63cf2b";
+
     private static MenuItem statusItem;
     private static MenuItem nowPlayingItem;
     private static MenuItem scrobbleProgressItem;
     private static MenuItem lastScrobbleItem;
     private static TrayIcon trayIcon;
 
-    public static void main(String[] args) throws IOException, InterruptedException {
-        if (args.length < 4) {
-            if (System.console() == null) {
-                args = new String[4];
-                args[0] = JOptionPane.showInputDialog("Please enter username");
-                if (args[0] == null) return;
-                args[1] = JOptionPane.showInputDialog("Please enter password (or md5 of password)");
-                if (args[1] == null) return;
-                args[2] = JOptionPane.showInputDialog("Please enter api key");
-                if (args[2] == null) return;
-                args[3] = JOptionPane.showInputDialog("Please enter secret");
-                if (args[3] == null) return;
-            } else {
-                System.err.println("Required arguments: username, password (or md5 of password), api key, secret\nRun with javaw (or double click the jar file) for GUI-based entry");
-                return;
-            }
-        }
+    // Track last set label values to avoid redundant setLabel calls
+    private static String lastStatusLabel = "";
+    private static String lastNowPlayingLabel = "";
+    private static String lastScrobbleLabel = "";
+    private static String lastTooltipText = "";
 
+    public static void main(String[] args) throws IOException, InterruptedException {
+        Caller.getInstance().setUserAgent("PotPlayer-LastFM");
+        SessionStore sessionStore = new SessionStore();
+
+        // Set up system tray
+        PopupMenu popup = null;
+        MenuItem logoutItem = null;
         if (SystemTray.isSupported()) {
-            final PopupMenu popup = new PopupMenu();
+            popup = new PopupMenu();
             trayIcon = new TrayIcon(ImageIO.read(Objects.requireNonNull(Main.class.getResource("/icon.png"))));
             final SystemTray tray = SystemTray.getSystemTray();
 
-            statusItem = new MenuItem("Status: Authenticating...");
+            statusItem = new MenuItem("Status: Starting...");
             statusItem.setEnabled(false);
             popup.add(statusItem);
 
@@ -72,12 +74,23 @@ public class Main {
 
             popup.addSeparator();
 
+            logoutItem = new MenuItem("Logout");
+            final SessionStore storeRef = sessionStore;
+            logoutItem.addActionListener(e -> {
+                storeRef.clear();
+                updateStatus("Status: Logged out");
+                updateTooltip("PotPlayer LastFM - Logged out");
+                JOptionPane.showMessageDialog(null, "Logged out. Restart the app to log in with a different account.");
+                System.exit(0);
+            });
+            popup.add(logoutItem);
+
             MenuItem exitItem = new MenuItem("Exit PotPlayer LastFM");
             exitItem.addActionListener(e -> System.exit(0));
             popup.add(exitItem);
 
             trayIcon.setPopupMenu(popup);
-            trayIcon.setToolTip("PotPlayer LastFM - Authenticating...");
+            trayIcon.setToolTip("PotPlayer LastFM - Starting...");
 
             try {
                 tray.add(trayIcon);
@@ -88,12 +101,8 @@ public class Main {
             System.err.println("SystemTray is not supported");
         }
 
-        String name = "PotPlayer";
-        String end = " - " + name;
-        Caller.getInstance().setUserAgent("PotPlayer-LastFM");
-
-        PotPlayer player;
-        Session session = Authenticator.getMobileSession(args[0], args[1], args[2], args[3]);
+        // Authenticate
+        Session session = authenticate(args, sessionStore);
         if (session == null) {
             System.err.println("Error authenticating with LastFM.");
             updateStatus("Status: Authentication FAILED");
@@ -105,121 +114,121 @@ public class Main {
             return;
         }
 
-        String username = args[0];
+        String username = session.getUsername() != null ? session.getUsername() : "unknown";
         updateStatus("Status: Connected as " + username);
         updateTooltip("PotPlayer LastFM - Waiting for PotPlayer...");
 
+        // Main scrobbling loop
+        String playerName = "PotPlayer";
+        String end = " - " + playerName;
+        PotPlayer player;
+
         while (true) {
-            List<Window> windows = JNAPotPlayerHelper.getAllPlayerWindows(window -> window.getWindowText().endsWith(end) || window.getWindowText().equals(name));
+            List<Window> windows = JNAPotPlayerHelper.getAllPlayerWindows(
+                    window -> window.getWindowText().endsWith(end) || window.getWindowText().equals(playerName));
             if (!windows.isEmpty()) {
                 player = new JNAPotPlayer(windows.get(0));
                 if (player.getPlayStatus() == PlayStatus.Undefined) {
                     Thread.sleep(160);
                     continue;
                 }
-                String t;
-                PlayStatus ps;
-                long ct;
+
                 Instant startTime = Instant.now();
                 Instant startTime2 = Instant.now();
                 boolean scrobbled = false;
                 String currSong = null;
-                boolean currSongParseable = false;
-                String currentArtist = "";
-                String currentTrack = "";
-                long lastUiUpdate = 0;
+                TrackParser.ParsedTrack currentParsed = null;
+                long lastCt = 0;
+                PlayStatus lastPs = null;
+
                 while (User32.INSTANCE.IsWindow(player.getWindow().getHwnd())) {
                     String tmp = WindowUtils.getWindowTitle(player.getWindow().getHwnd());
-                    if (!tmp.endsWith(end) && !tmp.equals(name)) break;
-                    PlayStatus tmpps = player.getPlayStatus();
-					ct = player.getCurrentTime();
-                    t = tmp;
-                    ps = tmpps;
-                    String song = t;
-                    if (song.endsWith(end)) song = song.substring(0, song.lastIndexOf(end));
-                    if (song.matches("\\.[a-zA-Z0-9]+$")) {
-                        song = song.substring(0, song.lastIndexOf('.'));
-                        song = song.replace('_', ' ');
-                    } else {
-                        song = song.replaceFirst(" \\([0-9-]+\\)$", "");
-                    }
-                    if (!song.equals(currSong)) {
+                    if (!tmp.endsWith(end) && !tmp.equals(playerName)) break;
+
+                    PlayStatus ps = player.getPlayStatus();
+                    long ct = player.getCurrentTime();
+
+                    // Parse song from window title
+                    String songTitle = TrackParser.extractSongTitle(tmp, playerName);
+
+                    // Detect song change
+                    if (songTitle != null && !songTitle.equals(currSong)) {
                         scrobbled = false;
                         startTime = Instant.now();
                         startTime2 = Instant.now();
-                        currSong = song;
+                        currSong = songTitle;
+                        currentParsed = TrackParser.parseFromWindowTitle(tmp, playerName);
 
-                        int sep = currSong.indexOf(" - ");
-                        if (sep < 0) {
-                            currSongParseable = false;
-                            currentArtist = "";
-                            currentTrack = currSong;
+                        if (currentParsed == null) {
                             updateNowPlaying(currSong + " (can't parse artist)");
-                            updateScrobbleProgress("Scrobble: skipped (unparseable title)");
+                            updateScrobbleProgress("Scrobble: skipped");
                         } else {
-                            currSongParseable = true;
-                            currentArtist = currSong.substring(0, sep);
-                            currentTrack = currSong.substring(sep + 3);
-                            updateNowPlaying(currentArtist + " - " + currentTrack);
+                            updateNowPlaying(currentParsed.artist + " - " + currentParsed.track);
+                            updateScrobbleProgress("Scrobble: waiting...");
 
                             if (ps == PlayStatus.Running || ps == PlayStatus.Paused) {
                                 try {
-                                    Track.updateNowPlaying(currentArtist, currentTrack, session);
+                                    Track.updateNowPlaying(currentParsed.artist, currentParsed.track, session);
                                 } catch (Exception e) {
                                     System.err.println("Error updating now playing: " + e.getMessage());
-                                    updateNowPlaying(currentArtist + " - " + currentTrack + " (now playing error)");
                                 }
                             }
                         }
+                        updateTooltip(truncate("PotPlayer LastFM: " +
+                                (currentParsed != null ? currentParsed.artist + " - " + currentParsed.track : currSong), 127));
                     }
+
                     if (ps == PlayStatus.Running) {
-                        if (ct < 1000) {
+                        // Detect same-song replay: playback position jumped backwards significantly
+                        if (ct < 1000 && lastCt > 5000) {
                             startTime = Instant.now();
+                            startTime2 = Instant.now();
                             scrobbled = false;
-                            currSong = null;
+                            updateScrobbleProgress("Scrobble: waiting...");
                         }
-                        if (!scrobbled && currSongParseable) {
-                            long thresholdSec = Math.min(3 * 60, player.getTotalTime() / 2000);
+
+                        if (!scrobbled && currentParsed != null) {
                             long elapsedSec = Duration.between(startTime, Instant.now()).getSeconds();
-                            if (elapsedSec > thresholdSec) {
+                            if (ScrobbleRule.shouldScrobble(elapsedSec, player.getTotalTime())) {
                                 try {
-                                    Track.scrobble(currentArtist, currentTrack, (int) (System.currentTimeMillis() / 1000), session);
+                                    Track.scrobble(currentParsed.artist, currentParsed.track,
+                                            (int) (System.currentTimeMillis() / 1000), session);
                                     scrobbled = true;
-                                    updateLastScrobble(currentArtist + " - " + currentTrack);
+                                    updateScrobbleProgress("Scrobble: done");
+                                    updateLastScrobble(currentParsed.artist + " - " + currentParsed.track);
                                 } catch (Exception e) {
                                     System.err.println("Error scrobbling: " + e.getMessage());
-                                    updateLastScrobble("FAILED: " + currentArtist + " - " + currentTrack);
+                                    updateLastScrobble("FAILED: " + currentParsed.artist + " - " + currentParsed.track);
                                 }
                             }
                         }
                     } else if (ps == PlayStatus.Paused) {
                         startTime = startTime.plus(Duration.between(startTime2, Instant.now()));
-                    }
-                    startTime2 = Instant.now();
-
-                    // Throttled UI updates (once per second)
-                    long now = System.currentTimeMillis();
-                    if (now - lastUiUpdate > 1000) {
-                        lastUiUpdate = now;
-                        if (currSongParseable && !scrobbled) {
-                            long thresholdSec = Math.min(3 * 60, player.getTotalTime() / 2000);
-                            long elapsedSec = Duration.between(startTime, Instant.now()).getSeconds();
-                            String pauseTag = (ps == PlayStatus.Paused) ? " (paused)" : "";
-                            updateScrobbleProgress(String.format("Scrobble: %d:%02d / %d:%02d%s",
-                                    elapsedSec / 60, elapsedSec % 60, thresholdSec / 60, thresholdSec % 60, pauseTag));
-                        } else if (scrobbled) {
-                            String pauseTag = (ps == PlayStatus.Paused) ? " (paused)" : "";
-                            updateScrobbleProgress("Scrobble: done" + pauseTag);
+                        if (lastPs != PlayStatus.Paused && !scrobbled) {
+                            updateScrobbleProgress("Scrobble: paused");
                         }
-                        String tooltipTrack = currSongParseable ? (currentArtist + " - " + currentTrack) : (currSong != null ? currSong : "");
-                        String tooltipStatus = (ps == PlayStatus.Paused) ? " (Paused)" : "";
-                        updateTooltip(truncate("PotPlayer LastFM: " + tooltipTrack + tooltipStatus, 127));
                     }
 
+                    // Update tooltip on play/pause state change
+                    if (ps != lastPs && currentParsed != null) {
+                        String state = (ps == PlayStatus.Paused) ? " (Paused)" : "";
+                        updateTooltip(truncate("PotPlayer LastFM: " +
+                                currentParsed.artist + " - " + currentParsed.track + state, 127));
+                    }
+
+                    // Resume from pause
+                    if (ps == PlayStatus.Running && lastPs == PlayStatus.Paused && !scrobbled) {
+                        updateScrobbleProgress("Scrobble: waiting...");
+                    }
+
+                    lastPs = ps;
+                    lastCt = ct;
+                    startTime2 = Instant.now();
                     Thread.sleep(16);
                 }
+
                 // Player window closed
-                updateNowPlaying("Now Playing: --");
+                updateNowPlaying("--");
                 updateScrobbleProgress("Scrobble: --");
                 updateTooltip("PotPlayer LastFM - Waiting for PotPlayer...");
             }
@@ -227,16 +236,77 @@ public class Main {
         }
     }
 
+    private static Session authenticate(String[] args, SessionStore sessionStore) {
+        // Try stored session first
+        SessionStore.StoredSession stored = sessionStore.loadSession();
+        if (stored != null) {
+            return Session.createSession(API_KEY, API_SECRET, stored.sessionKey, stored.username, false);
+        }
+
+        // If CLI args provided (legacy support), use mobile auth
+        if (args.length >= 4) {
+            Session session = Authenticator.getMobileSession(args[0], args[1], args[2], args[3]);
+            if (session != null) {
+                sessionStore.saveSession(args[0], session.getKey());
+            }
+            return session;
+        }
+
+        // Web auth flow
+        try {
+            String token = Authenticator.getToken(API_KEY);
+            if (token == null) {
+                System.err.println("Failed to get auth token from Last.fm");
+                return null;
+            }
+
+            String authUrl = "https://www.last.fm/api/auth/?api_key=" + API_KEY + "&token=" + token;
+
+            // Open browser
+            if (Desktop.isDesktopSupported() && Desktop.getDesktop().isSupported(Desktop.Action.BROWSE)) {
+                Desktop.getDesktop().browse(new URI(authUrl));
+            } else {
+                JOptionPane.showMessageDialog(null,
+                        "Open this URL in your browser to authorize:\n" + authUrl);
+            }
+
+            // Wait for user to authorize
+            JOptionPane.showMessageDialog(null,
+                    "Authorize PotPlayer LastFM in your browser, then click OK.",
+                    "PotPlayer LastFM - Authorization",
+                    JOptionPane.INFORMATION_MESSAGE);
+
+            Session session = Authenticator.getSession(token, API_KEY, API_SECRET);
+            if (session != null) {
+                sessionStore.saveSession(session.getUsername(), session.getKey());
+            }
+            return session;
+        } catch (Exception e) {
+            System.err.println("Web auth failed: " + e.getMessage());
+            return null;
+        }
+    }
+
     private static void updateStatus(String text) {
-        if (statusItem != null) statusItem.setLabel(text);
+        if (statusItem != null && !text.equals(lastStatusLabel)) {
+            statusItem.setLabel(text);
+            lastStatusLabel = text;
+        }
     }
 
     private static void updateNowPlaying(String text) {
-        if (nowPlayingItem != null) nowPlayingItem.setLabel("Now Playing: " + text);
+        String label = "Now Playing: " + text;
+        if (nowPlayingItem != null && !label.equals(lastNowPlayingLabel)) {
+            nowPlayingItem.setLabel(label);
+            lastNowPlayingLabel = label;
+        }
     }
 
     private static void updateScrobbleProgress(String text) {
-        if (scrobbleProgressItem != null) scrobbleProgressItem.setLabel(text);
+        if (scrobbleProgressItem != null && !text.equals(lastScrobbleLabel)) {
+            scrobbleProgressItem.setLabel(text);
+            lastScrobbleLabel = text;
+        }
     }
 
     private static void updateLastScrobble(String text) {
@@ -244,7 +314,10 @@ public class Main {
     }
 
     private static void updateTooltip(String text) {
-        if (trayIcon != null) trayIcon.setToolTip(text);
+        if (trayIcon != null && !text.equals(lastTooltipText)) {
+            trayIcon.setToolTip(text);
+            lastTooltipText = text;
+        }
     }
 
     private static String truncate(String text, int maxLen) {
