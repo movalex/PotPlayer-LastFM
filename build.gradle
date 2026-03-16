@@ -14,7 +14,7 @@ dependencies {
     implementation 'de.u-mass:lastfm-java:0.1.2'
     implementation 'net.java.dev.jna:jna:5.10.0'
     implementation 'net.java.dev.jna:jna-platform:5.10.0'
-    implementation files('lib/potplayercontrol-1.0.1.jar')
+    implementation 'com.github.ld3l:PotPlayerControl:f817b150a5'
 }
 
 jar {
