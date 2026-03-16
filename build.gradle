@@ -7,14 +7,13 @@ version = '1.0-SNAPSHOT'
 
 repositories {
     mavenCentral()
-    maven { url 'https://jitpack.io' }
 }
 
 dependencies {
     implementation 'de.u-mass:lastfm-java:0.1.2'
     implementation 'net.java.dev.jna:jna:5.10.0'
     implementation 'net.java.dev.jna:jna-platform:5.10.0'
-    implementation 'com.github.ld3l:PotPlayerControl:f817b150a5'
+    implementation files('lib/potplayercontrol-1.0.1.jar')
 }
 
 jar {
