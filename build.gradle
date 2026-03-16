@@ -18,6 +18,8 @@ dependencies {
 }
 
 jar {
+    archiveBaseName.set('PotPlayer-LastFM')
+
     manifest {
         attributes 'Main-Class': 'me.ayunami2000.potplayerlastfm.Main'
     }
