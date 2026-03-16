@@ -27,8 +27,8 @@ public class Main {
 
     // Last.fm API application credentials (app-level, not user secrets)
     // Replace with your own from https://www.last.fm/api/account/create
-    private static final String API_KEY = "YOUR_API_KEY";
-    private static final String API_SECRET = "YOUR_API_SECRET";
+    private static final String API_KEY = "d398a283955fee02e6fe1cd83e97afcf";
+    private static final String API_SECRET = "5fdf461c6178a7841af1d2950d63cf2b";
 
     private static MenuItem statusItem;
     private static MenuItem nowPlayingItem;
