@@ -18,13 +18,11 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - name: Build PotPlayerControl dependency
+      - name: Install PotPlayerControl to Maven local
         run: |
           git clone --depth 1 https://github.com/ld3l/PotPlayerControl.git /tmp/PotPlayerControl
           cd /tmp/PotPlayerControl
-          mvn package -q -DskipTests
-          mkdir -p $GITHUB_WORKSPACE/lib
-          cp target/potplayercontrol-1.0.1.jar $GITHUB_WORKSPACE/lib/
+          mvn install -q -DskipTests
 
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
@@ -52,13 +50,11 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - name: Build PotPlayerControl dependency
+      - name: Install PotPlayerControl to Maven local
         run: |
           git clone --depth 1 https://github.com/ld3l/PotPlayerControl.git /tmp/PotPlayerControl
           cd /tmp/PotPlayerControl
-          mvn package -q -DskipTests
-          mkdir -p $GITHUB_WORKSPACE/lib
-          cp target/potplayercontrol-1.0.1.jar $GITHUB_WORKSPACE/lib/
+          mvn install -q -DskipTests
 
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
